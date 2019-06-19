@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""
+Check Python code style according to PEP8 and pylint.
+
+If a directory is named all Python files in and under that directory will
+be checked.
+
+Normally %(prog)s uses config files from its own ./etc directory but the
+-d flag will use your own pylint and PEP8 configurations which are liable
+to be stricter. Note that the script which checks for PEP8 correctness
+used to be called "pep8" but has since been renamed "pycodestyle".
+
+Some third-party code may be present in the form of .egg, .whl, or .zip
+files. These are always ignored.
+
+Note that PEP8 errors are never acceptable because always fixable. Pylint
+errors, on the other hand, can be hard to fix because pylint is quite
+picky but you should make an effort to look at them all and fix them
+if reasonable.  In particular this is pretty tolerant of "too many"
+complaints such as "too many lines", "too many attributes", etc.
+
+Pylint complaints can be suppressed with a conventional comment such
+as "# pylint: disable=too-many-nested-blocks" so it should always be
+possible to be entirely clean, in the sense of no complaints being
+printed, by either fixing or disabling pylint messages.
+
+Why is %(prog)s better than running pycodestyle and pylint (or
+other tools, such as pycheck, pyflakes, etc) by hand? Well, you are
+certainly allowed and encouraged to run all the code-checking tools you
+like. This one is just a convenience because it (a) bundles pycodestyle
+and pylint into one command, (b) determines and checks the change set
+automatically, (c) defaults to using a set of config files which have
+been specially tuned, and (d) adds a few custom checks such as one for
+quote consistency.
+
+Bottom line, %(prog)s sets a baseline for style preferences but there is
+certainly no prohibition on holding your own code to a higher standard
+and/or running it through other checkers.
+
+EXAMPLES:
+
+To check your current modified files:
+
+    %(prog)s
+
+To check a specific file, modified or not:
+
+    %(prog)s lib/module.py
+
+To check all Python files in and under "subdir":
+
+    %(prog)s subdir
+"""
+
+import argparse
+import bdb
+import os
+import subprocess
+import sys
+
+PROG = os.path.basename(__file__)
+TOOLDIR = os.path.dirname(os.path.dirname(__file__))
+
+SKIPDIRSET = set((
+    '.git',
+    '.svn',
+))
+
+SKIPEXTSET = set((
+    '.c',
+    '.h',
+    '.mk',
+    '.pyc',
+))
+
+# Apparently pylint will ignore any file not ending with .py.
+# Therefore, to check scripts that have no extension we must
+# create a temporary link with a .py extension and remember to
+# remove them at exit.
+LINKSET = set()
+
+VIM_FOOTER = 'vim: ts=8:sw=4:et:tw=80:'
+
+
+def shortpath(path, start='.'):
+    """Return the shorter of os.path.{relpath,abspath}(path)."""
+    spath = os.path.relpath(path, start=start)
+    if spath.startswith('../'):
+        apath = os.path.abspath(path)
+        if len(apath) < len(spath):
+            spath = apath
+
+    return spath
+
+
+def is_python(paths):
+    """Return the subset of paths which appear to be Python files."""
+    pyset = set()
+    if paths:
+        cmd = ['file'] + sorted(paths)
+        stdout = subprocess.check_output(cmd).decode('utf-8')
+        for line in stdout.splitlines():
+            path, desc = line.strip().split(':', 1)
+            if 'python' in desc.lower():
+                pyset.add(path)
+    return pyset
+
+
+def main():
+    """Check Python code style according to PEP8 and pylint."""
+    parser = argparse.ArgumentParser(
+        epilog=__doc__.strip(),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        '-d', '--default-cfg', action='count', default=0,
+        help="do not force %(prog)s-internal config")
+    parser.add_argument(
+        '--double-quote-preferred', action='store_true',
+        help="complain about use of single quotes, not double")
+    parser.add_argument(
+        '-8', '--pep8-only', action='store_true',
+        help="run the PEP8 checker script only")
+    parser.add_argument(
+        '-l', '--pylint-only', action='store_true',
+        help="run pylint only")
+    parser.add_argument(
+        '-q', '--quiet', action='store_const', const=-1, default=0,
+        help="suppress verbosity")
+    parser.add_argument(
+        '-s', '--skipped', action='count', default=0,
+        help="suppress warning about skipped files")
+    parser.add_argument(
+        '-V', '--verbose', action='count', default=0,
+        help="increment verbosity level")
+    parser.add_argument('files', nargs=argparse.REMAINDER)
+    opts = parser.parse_args()
+
+    def verbose(cmd):
+        """Print an optional exec verbosity line."""
+        if not opts.quiet:
+            sys.stderr.write('+ %s\n' % ' '.join(cmd))
+
+    rc = 0
+    pypaths = set()
+    base = '.'
+    if opts.files:
+        unknowns = set()
+        for fname in opts.files:
+            path = shortpath(os.path.abspath(fname), base)
+            if path.endswith('.py'):
+                pypaths.add(path)
+                continue
+            elif not os.path.isdir(path):
+                unknowns.add(path)
+                continue
+
+            for parent, dnames, fnames in os.walk(path):
+                dnames[:] = [d for d in dnames if d not in SKIPDIRSET]
+                for fn in [f for f in fnames if f[0] != '_']:
+                    fpath = os.path.join(parent, fn)
+                    if os.path.islink(fpath):
+                        pass
+                    elif fn.endswith('.pyc') or fn.startswith('README'):
+                        pass
+                    elif fn.endswith('.py'):
+                        pypaths.add(fpath)
+                    elif os.path.splitext(fn)[1] not in SKIPEXTSET:
+                        unknowns.add(fpath)
+        if unknowns:
+            pypaths |= is_python(unknowns)
+        changeset = pypaths
+    else:
+        changeset = set()
+        unknowns = set()
+        cmd = []
+        assert cmd, 'Cannot derive change set without knowing the SCM tool!'
+        verbose(cmd)
+        stdout = subprocess.check_output(cmd).decode('utf-8')
+        for line in stdout.splitlines():
+            path = os.path.normpath(line.rstrip())
+            if os.path.isdir(path):
+                continue
+            if os.path.splitext(path)[1] in SKIPEXTSET:
+                continue
+            changeset.add(path)
+            topdir = path.split(os.sep, 1)[0]
+            if topdir in SKIPDIRSET:
+                continue
+            if path.endswith('.py'):
+                pypaths.add(path)
+            else:
+                unknowns.add(path)
+        pypaths |= is_python(unknowns)
+
+    if not pypaths:
+        sys.stderr.write('%s: nothing to do\n' % PROG)
+        sys.exit(0)
+
+    paths = [shortpath(p, base) for p in sorted(pypaths)]
+
+    if opts.pylint_only or not opts.pep8_only:
+        cmd = ['pylint']
+        if not opts.default_cfg:
+            cmd.append('--rcfile=%s' % (shortpath(
+                os.path.join(TOOLDIR, 'etc/config/pylintrc'))))
+        # Apparently pylint will ignore any file not ending with .py.
+        # Therefore, to check scripts that have no extension we must
+        # create a temporary link with a .py extension.
+        for path in paths:
+            if path.endswith('.py'):
+                cmd.append(path)
+            elif path in pypaths or not os.path.splitext(path)[1]:
+                pylink = path + '.py'
+                if os.path.exists(pylink):
+                    sys.stderr.write('%s: pre-existing %s\n', (PROG, pylink))
+                else:
+                    try:
+                        os.link(path, pylink)
+                    except OSError:
+                        pylink = os.path.join('/tmp', os.path.basename(pylink))
+                        os.symlink(os.path.abspath(path), pylink)
+                    LINKSET.add(pylink)
+                cmd.append(pylink)
+        verbose(cmd)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        output = proc.stdout.read().decode('utf-8')
+        if proc.wait():
+            for line in output.splitlines():
+                if len(line) > 2 and line[0].isupper() and line[1] == ':':
+                    rc = 2
+            if not opts.quiet:
+                if rc == 0:
+                    msg = 'pylint messages may be disabled if hard to fix'
+                else:
+                    msg = 'hard errors found!'
+                sys.stdout.write('PYLINT: (%s)\n' % msg)
+            sys.stdout.write(output + '\n')
+        for link in LINKSET:
+            os.unlink(link)
+        LINKSET.clear()
+
+    if opts.pep8_only or not opts.pylint_only:
+        cmd = ['pycodestyle']
+        # This file is empty now but kept to override personal config files.
+        if not opts.default_cfg and not os.path.isfile('setup.cfg'):
+            cmd.append('--config=%s' % (shortpath(
+                os.path.join(TOOLDIR, 'etc/config/pep8'))))
+        # See the config file for explanations of these overrides.
+        cmd.append('--ignore=E402,W504')
+        if not opts.pep8_only:
+            cmd[-1] += ',E501'
+        cmd.extend(paths)
+        verbose(cmd)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        output = proc.stdout.read().decode('utf-8')
+        if proc.wait():
+            sys.stdout.write('PEP8: %s\n' % output)
+            rc = 2
+
+    if not (opts.pylint_only or opts.pep8_only):
+        if not opts.quiet:
+            sys.stderr.write('[custom checks]\n')
+        problems = []
+        for path in paths:
+            text = open(path).read()
+
+            # It saves a lot of future trouble if vim users are automatically
+            # configured to keep tabs out and otherwise follow PEP8. But it's
+            # impossible to enumerate all legal settings and orderings thereof,
+            # so simply check for the existence of a vim footer and assume
+            # the user knows what they're doing with it. If I knew the
+            # analogous emacs incantation I might check for that too.
+            if '# vim: ' not in text:
+                problems.append('%s: recommend PEP8 vim footer "# %s"' %
+                                (path, VIM_FOOTER))
+                rc = 2
+
+            # Determine the preferred and alternate quote chars. Single is
+            # preferred but there are backward compatibility issues so it
+            # can't be required.
+            if opts.double_quote_preferred:
+                pq, aq = '"', "'"
+            else:
+                sq = text.count("'")
+                dq = text.count('"') - (text.count('"""') * 3)
+                if dq > 0 and (sq == 0 or (dq / float(sq)) > 2.0):
+                    pq, aq = '"', "'"
+                else:
+                    pq, aq = "'", '"'
+            if pq == '"':
+                sys.stderr.write(
+                    '%s: treating double quotes as preferred in %s\n',
+                    (PROG, path))
+
+            # This is a heuristic which guesses when we're inside a docstring.
+            docstate = 0
+            lineno = 0
+            for line in text.splitlines():
+                lineno += 1
+                docstate += line.count('"""')
+                line = line.strip()
+
+                if not line:
+                    continue
+                elif docstate % 2:
+                    continue
+                elif line[0] == '#':
+                    continue
+
+                # Complain about anonymous exception handing. Pylint is
+                # supposed to do this but doesn't seem to in some cases.
+                if line.endswith('except:'):
+                    problems.append('%s:%d should use "except Exception:"' %
+                                    (path, lineno))
+                    rc = 2
+                    continue
+
+                # Double-check that a debug trap wasn't left in. Need to do
+                # some weird string things to make sure these lines don't
+                # catch themselves.
+                # Compound-stmt uses will have been caught earlier.
+                if ' %s.' % 'pdb' in line and ';' not in line:
+                    dbg = line.split('pdb.', 1)[-1].split()[0]
+                    problems.append('%s:%d debug call remains: %s.%s' %
+                                    (path, lineno, 'pdb', dbg))
+                    rc = 2
+
+                # Complain about "wrong" quotes (single are preferred).
+                if 'help=' in line:
+                    # Special convention to allow for contractions.
+                    pass
+                elif '"""' in line:
+                    # Always allow triple-double quotes for special cases.
+                    pass
+                elif """'"'""" in line or '''"'"''' in line:
+                    # Literal single or double quotes are allowed.
+                    pass
+                elif path.endswith('lib/pop.py'):
+                    # This file contains an embedded .gclient template.
+                    pass
+                elif path.endswith('lib/contents.py'):
+                    # This file contains embedded HTML and Javascript.
+                    pass
+                elif aq in line and pq not in line:
+                    # If both quote types are used together, assume it's a
+                    # complex quoting situation and not an oversight.
+                    problems.append('%s:%d inconsistent quote: %s' %
+                                    (path, lineno, line))
+                    rc = 2
+
+        if problems:
+            sys.stdout.write('CUSTOM:\n')
+            for problem in problems:
+                sys.stdout.write(problem + '\n')
+
+    sys.exit(rc)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (Exception, KeyboardInterrupt, bdb.BdbQuit):
+        for symlink in LINKSET:
+            if os.path.exists(symlink):
+                os.unlink(symlink)
+        raise
+
+# vim: ts=8:sw=4:et:tw=80:

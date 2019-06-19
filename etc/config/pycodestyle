@@ -1,0 +1,21 @@
+# Note: some of these settings are actually handled at the command
+# line and are shown here only for documentation purposes.
+
+[pycodestyle]
+# Note that when running pylint too we actually ignore PEP8
+# max line length errors (E501) entirely via the command line
+# for two reasons:
+# 1. Pylint checks for long lines too so PEP8 checks are redundant.
+# 2. Pylint is more configurable via disable= comments in the code.
+# There's some confusion over whether the limit should be 79 or 80.
+#max_line_length = 79
+
+# Suppress "module level import not at top of file" because
+# it's too strict. Imports should be near the top but there
+# are good reasons not to force them to be *at* the top.
+#ignore = E402
+
+# This warning seems impossible to satisfy. I've tried contorting
+# the offending code various ways and it just won't shut up.
+# I see no problem with "line break after binary operator" anyway.
+#ignore = W504
